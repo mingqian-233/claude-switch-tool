@@ -330,57 +330,48 @@ except Exception as e:
 
     echo -e "${DIM}正在查询 API...${NC}"
 
-    # 调用 API
-    local response
-    response=$(curl -s \
+    # 调用 API (带 HTTP 状态码)
+    local response http_code body
+    response=$(curl -s -w "\n%{http_code}" \
         -H "Authorization: Bearer $token" \
         -H "anthropic-beta: oauth-2025-04-20" \
         -H "User-Agent: claude-switch/1.0" \
         https://api.anthropic.com/api/oauth/usage 2>/dev/null)
 
-    if [ $? -ne 0 ]; then
-        _die "API 请求失败"
+    http_code=$(echo "$response" | tail -1)
+    body=$(echo "$response" | sed '$d')
+
+    if [ "$http_code" != "200" ]; then
+        _die "API 请求失败 (HTTP $http_code)"
     fi
 
     # 解析 JSON
     local parsed
-    parsed=$(echo "$response" | python3 -c "
+    parsed=$(echo "$body" | python3 -c "
 import json, sys
 try:
     data = json.loads(sys.stdin.read())
 
-    if isinstance(data, dict) and data.get('error'):
-        err = data.get('error')
-        if isinstance(err, dict):
-            msg = err.get('message') or str(err)
-        else:
-            msg = str(err)
-        print(f'ERROR:API:{msg[:160]}')
+    # 检查是否为错误响应
+    if 'error' in data:
+        err = data.get('error', {})
+        msg = err.get('message', str(err)) if isinstance(err, dict) else str(err)
+        print(f'ERROR:{msg}')
         sys.exit(0)
-
-    five_hour = data.get('five_hour') or data.get('fiveHour') or {}
-    seven_day = data.get('seven_day') or data.get('sevenDay') or {}
-    extra_usage = data.get('extra_usage') or data.get('extraUsage') or {}
 
     # 提取信息
     session_percent = '?'
     weekly_percent = '?'
     extra_info = ''
 
-    session_val = five_hour.get('utilization')
-    if session_val is None:
-        session_val = five_hour.get('utilization_percent')
-    if session_val is not None:
-        session_percent = str(round(session_val))
+    if data.get('five_hour') and data['five_hour'].get('utilization') is not None:
+        session_percent = str(round(data['five_hour']['utilization']))
 
-    weekly_val = seven_day.get('utilization')
-    if weekly_val is None:
-        weekly_val = seven_day.get('utilization_percent')
-    if weekly_val is not None:
-        weekly_percent = str(round(weekly_val))
+    if data.get('seven_day') and data['seven_day'].get('utilization') is not None:
+        weekly_percent = str(round(data['seven_day']['utilization']))
 
-    if extra_usage and extra_usage.get('is_enabled'):
-        extra = extra_usage
+    if data.get('extra_usage') and data['extra_usage'].get('is_enabled'):
+        extra = data['extra_usage']
         if extra.get('used_credits') is not None and extra.get('monthly_limit') is not None:
             extra_percent = round((extra['used_credits'] / extra['monthly_limit']) * 100)
             extra_info = f'Extra: \${extra[\"used_credits\"]:.0f} / \${extra[\"monthly_limit\"]} ({extra_percent}%)'
@@ -391,7 +382,7 @@ try:
     print(f'EXTRA:{extra_info}')
 
 except Exception as e:
-    print(f'ERROR:PARSE:{str(e)}')
+    print(f'ERROR:{str(e)}')
 ")
 
     if [[ "$parsed" == ERROR:* ]]; then
@@ -480,46 +471,37 @@ except:
             continue
         fi
 
-        # 调用 API
-        local response
-        response=$(curl -s \
+        # 调用 API (带 HTTP 状态码)
+        local response http_code body
+        response=$(curl -s -w "\n%{http_code}" \
             -H "Authorization: Bearer $token" \
             -H "anthropic-beta: oauth-2025-04-20" \
             -H "User-Agent: claude-switch/1.0" \
             https://api.anthropic.com/api/oauth/usage 2>/dev/null)
 
-        if [ $? -ne 0 ]; then
-            echo -e "${YELLOW}API_ERROR${NC}"
+        http_code=$(echo "$response" | tail -1)
+        body=$(echo "$response" | sed '$d')
+
+        if [ "$http_code" != "200" ]; then
+            echo -e "${RED}HTTP $http_code${NC}"
             continue
         fi
 
         # 解析
         local usage_info
-        usage_info=$(echo "$response" | python3 -c "
+        usage_info=$(echo "$body" | python3 -c "
 import json, sys
 try:
     data = json.loads(sys.stdin.read())
 
-    if isinstance(data, dict) and data.get('error'):
-        err = data.get('error')
-        if isinstance(err, dict):
-            msg = err.get('message') or str(err)
-        else:
-            msg = str(err)
-        print('API_ERROR:' + msg[:120])
+    # 检查是否为错误响应
+    if 'error' in data or 'type' in data and data.get('type') == 'error':
+        msg = data.get('error', {}).get('message', '') if isinstance(data.get('error'), dict) else str(data.get('error', ''))
+        print(f'ERR:{msg[:40]}')
         sys.exit(0)
 
-    five_hour = data.get('five_hour') or data.get('fiveHour') or {}
-    seven_day = data.get('seven_day') or data.get('sevenDay') or {}
-    extra_usage = data.get('extra_usage') or data.get('extraUsage') or {}
-
-    session = five_hour.get('utilization')
-    if session is None:
-        session = five_hour.get('utilization_percent')
-
-    weekly = seven_day.get('utilization')
-    if weekly is None:
-        weekly = seven_day.get('utilization_percent')
+    session = data.get('five_hour', {}).get('utilization')
+    weekly = data.get('seven_day', {}).get('utilization')
 
     if session is None:
         session_str = '?'
@@ -533,7 +515,7 @@ try:
 
     # 检查 extra usage
     extra_str = ''
-    extra = extra_usage
+    extra = data.get('extra_usage')
     if extra and extra.get('is_enabled'):
         used = extra.get('used_credits')
         limit = extra.get('monthly_limit')
@@ -546,17 +528,11 @@ except:
     print('PARSE_ERROR')
 " 2>/dev/null)
 
-        case "$usage_info" in
-            API_ERROR:*)
-                echo -e "${YELLOW}API_ERROR${NC}  ${DIM}${usage_info#API_ERROR:}${NC}"
-                ;;
-            PARSE_ERROR)
-                echo -e "${YELLOW}PARSE_ERROR${NC}"
-                ;;
-            *)
-                echo -e "${GREEN}$usage_info${NC}"
-                ;;
-        esac
+        if [[ "$usage_info" == ERR:* ]]; then
+            echo -e "${RED}${usage_info#ERR:}${NC}"
+        else
+            echo -e "${GREEN}$usage_info${NC}"
+        fi
     done
 
     echo ""
@@ -656,21 +632,30 @@ except:
     print('ERROR')
 " 2>/dev/null)
 
-        local usage_info="?"
+        local usage_info="-1:-1:-1:?"
         if [[ "$token" != ERROR* ]]; then
-            # 调用 API
-            local response
-            response=$(curl -s \
+            # 调用 API (带 HTTP 状态码)
+            local response http_code body
+            response=$(curl -s -w "\n%{http_code}" \
                 -H "Authorization: Bearer $token" \
                 -H "anthropic-beta: oauth-2025-04-20" \
                 -H "User-Agent: claude-switch/1.0" \
                 https://api.anthropic.com/api/oauth/usage 2>/dev/null)
 
-            if [ $? -eq 0 ]; then
-                usage_info=$(echo "$response" | python3 -c "
+            http_code=$(echo "$response" | tail -1)
+            body=$(echo "$response" | sed '$d')
+
+            if [ "$http_code" = "200" ]; then
+                usage_info=$(echo "$body" | python3 -c "
 import json, sys
 try:
     data = json.loads(sys.stdin.read())
+
+    # 检查是否为错误响应
+    if 'error' in data or 'type' in data and data.get('type') == 'error':
+        print('-1:-1:-1:ERR')
+        sys.exit(0)
+
     session = data.get('five_hour', {}).get('utilization')
     weekly = data.get('seven_day', {}).get('utilization')
 
@@ -704,6 +689,8 @@ try:
 except Exception as e:
     print('-1:-1:-1:?')
 " 2>/dev/null)
+            else
+                usage_info="-1:-1:-1:HTTP$http_code"
             fi
         fi
 

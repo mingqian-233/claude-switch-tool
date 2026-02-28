@@ -1,0 +1,858 @@
+#!/usr/bin/env bash
+# Install script for claude-switch tool
+# Usage: ./install-claude-switch.sh
+
+set -euo pipefail
+
+# Colors
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+RED='\033[0;31m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+_info() { echo -e "${CYAN}>>>${NC} $*"; }
+_ok() { echo -e "${GREEN}>>>${NC} $*"; }
+_warn() { echo -e "${YELLOW}>>>${NC} $*"; }
+_die() { echo -e "${RED}error:${NC} $*" >&2; exit 1; }
+
+# Check if running as root (for system-wide install)
+if [ "$EUID" -ne 0 ]; then
+    _warn "Not running as root. Will install to ~/.local/bin instead."
+    INSTALL_PREFIX="${HOME}/.local"
+else
+    INSTALL_PREFIX="/usr/local"
+fi
+
+BIN_DIR="${INSTALL_PREFIX}/bin"
+SCRIPT_NAME="claude-switch"
+ALIAS_NAME="cs"
+
+# Create bin directory if it doesn't exist
+mkdir -p "$BIN_DIR"
+
+# Create the main script
+_info "Creating ${BOLD}${SCRIPT_NAME}${NC} script..."
+cat > "/tmp/${SCRIPT_NAME}" << 'EOF'
+#!/usr/bin/env bash
+# claude-switch: 一键切换 Claude Code 账号，共享聊天记录
+# 用法:
+#   claude-switch save <名称>    保存当前账号凭证
+#   claude-switch <名称>         切换到指定账号
+#   claude-switch ls             列出所有已保存账号
+#   claude-switch check          检测各账号可用性
+#   claude-switch rm <名称>      删除已保存账号
+#   claude-switch current        显示当前账号
+
+set -euo pipefail
+
+STORE_DIR="$HOME/.claude/accounts"
+CRED_FILE="$HOME/.claude/.credentials.json"
+STATE_FILE="$HOME/.claude.json"
+
+mkdir -p "$STORE_DIR"
+
+# ── 颜色 ──
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+CYAN='\033[0;36m'
+RED='\033[0;31m'
+DIM='\033[2m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+_die()    { echo -e "${RED}error:${NC} $*" >&2; exit 1; }
+_info()   { echo -e "${CYAN}>>>${NC} $*"; }
+_ok()     { echo -e "${GREEN}>>>${NC} $*"; }
+
+# ── 读取账号信息 ──
+_read_account_info() {
+    local oauth_file="$1"
+    python3 -c "
+import json, sys
+try:
+    d = json.load(open('$oauth_file'))
+    print(d.get('emailAddress','unknown'))
+    print(d.get('displayName',''))
+    print(d.get('billingType',''))
+except:
+    print('unknown')
+    print('')
+    print('')
+" 2>/dev/null
+}
+
+_read_cred_info() {
+    local cred_file="$1"
+    python3 -c "
+import json, sys, datetime
+try:
+    d = json.load(open('$cred_file'))
+    oa = d.get('claudeAiOauth', {})
+    sub = oa.get('subscriptionType', '?')
+    tier = oa.get('rateLimitTier', '')
+    exp = oa.get('expiresAt', 0)
+    if exp:
+        dt = datetime.datetime.fromtimestamp(exp / 1000)
+        exp_str = dt.strftime('%m-%d %H:%M')
+    else:
+        exp_str = '?'
+    print(sub)
+    print(tier)
+    print(exp_str)
+except:
+    print('?')
+    print('')
+    print('?')
+" 2>/dev/null
+}
+
+# ── 获取当前账号邮箱 ──
+_current_email() {
+    python3 -c "
+import json, sys
+try:
+    d = json.load(open('$STATE_FILE'))
+    print(d.get('oauthAccount',{}).get('emailAddress','unknown'))
+except: print('unknown')
+" 2>/dev/null
+}
+
+# ── 获取当前账号显示名 ──
+_current_display() {
+    python3 -c "
+import json, sys
+try:
+    d = json.load(open('$STATE_FILE'))
+    oa = d.get('oauthAccount',{})
+    print(f\"{oa.get('displayName','?')} <{oa.get('emailAddress','?')}>\")
+except: print('unknown')
+" 2>/dev/null
+}
+
+# ── save: 保存当前凭证 ──
+cmd_save() {
+    local name="${1:?用法: claude-switch save <名称>}"
+    local dir="$STORE_DIR/$name"
+    mkdir -p "$dir"
+
+    [ -f "$CRED_FILE" ] || _die "未找到 $CRED_FILE，请先 /login"
+
+    # 保存 credentials
+    cp "$CRED_FILE" "$dir/credentials.json"
+
+    # 从 ~/.claude.json 提取 oauthAccount
+    python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    d = json.load(f)
+with open('$dir/oauth_account.json', 'w') as f:
+    json.dump(d.get('oauthAccount', {}), f, indent=2)
+"
+    _ok "已保存账号 ${BOLD}$name${NC} ($(_current_email))"
+}
+
+# ── switch: 切换账号（只替换认证，保留其他一切） ──
+cmd_switch() {
+    local name="$1"
+    local dir="$STORE_DIR/$name"
+
+    [ -d "$dir" ] || _die "账号 '$name' 不存在。用 ${BOLD}claude-switch ls${NC} 查看已保存账号"
+
+    local old_email
+    old_email=$(_current_email)
+
+    # 替换 credentials 文件
+    cp "$dir/credentials.json" "$CRED_FILE"
+
+    # 只替换 ~/.claude.json 中的 oauthAccount 字段，保留其他所有内容
+    python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    state = json.load(f)
+with open('$dir/oauth_account.json') as f:
+    oauth = json.load(f)
+state['oauthAccount'] = oauth
+with open('$STATE_FILE', 'w') as f:
+    json.dump(state, f, indent=2)
+"
+    local new_email
+    new_email=$(_current_email)
+    _ok "已切换: ${YELLOW}${old_email}${NC} → ${GREEN}${new_email}${NC}"
+}
+
+# ── ls: 列出所有账号 ──
+cmd_ls() {
+    local current_email
+    current_email=$(_current_email)
+
+    echo -e "${BOLD}已保存的账号:${NC}"
+    echo ""
+
+    local found=0
+    for dir in "$STORE_DIR"/*/; do
+        [ -d "$dir" ] || continue
+        found=1
+        local name email display billing sub tier expires
+        name=$(basename "$dir")
+
+        # 读取账号信息
+        {
+            read -r email
+            read -r display
+            read -r billing
+        } < <(_read_account_info "${dir}oauth_account.json")
+
+        # 读取凭证信息
+        {
+            read -r sub
+            read -r tier
+            read -r expires
+        } < <(_read_cred_info "${dir}credentials.json")
+
+        # 构造标签
+        local sub_tag=""
+        case "$sub" in
+            pro)        sub_tag="${CYAN}pro${NC}" ;;
+            max_5x)     sub_tag="${GREEN}max5x${NC}" ;;
+            max_20x)    sub_tag="${GREEN}max20x${NC}" ;;
+            *)          sub_tag="${DIM}${sub}${NC}" ;;
+        esac
+
+        local tier_tag=""
+        if [ -n "$tier" ] && [ "$tier" != "default_claude_ai" ]; then
+            tier_tag=" ${DIM}($tier)${NC}"
+        fi
+
+        if [ "$email" = "$current_email" ]; then
+            echo -e "  ${GREEN}*${NC} ${BOLD}$name${NC}  ${GREEN}$email${NC}  [$sub_tag]${tier_tag}  ${DIM}exp:$expires${NC}  ${GREEN}← current${NC}"
+        else
+            echo -e "    $name  $email  [$sub_tag]${tier_tag}  ${DIM}exp:$expires${NC}"
+        fi
+    done
+
+    [ "$found" -eq 0 ] && echo -e "  ${YELLOW}(空) 用 claude-switch save <名称> 保存当前账号${NC}"
+    echo ""
+}
+
+# ── check: 检测各账号可用性 ──
+cmd_check() {
+    local current_email
+    current_email=$(_current_email)
+
+    # 备份当前凭证
+    local backup_cred backup_oauth
+    backup_cred=$(cat "$CRED_FILE")
+    backup_oauth=$(python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    print(json.dumps(json.load(f).get('oauthAccount', {})))
+" 2>/dev/null)
+
+    echo -e "${BOLD}检测各账号可用性...${NC}"
+    echo ""
+
+    for dir in "$STORE_DIR"/*/; do
+        [ -d "$dir" ] || continue
+        local name email
+        name=$(basename "$dir")
+        read -r email < <(_read_account_info "${dir}oauth_account.json")
+
+        # 临时切换到该账号
+        cp "${dir}credentials.json" "$CRED_FILE"
+        python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    state = json.load(f)
+with open('${dir}oauth_account.json') as f:
+    oauth = json.load(f)
+state['oauthAccount'] = oauth
+with open('$STATE_FILE', 'w') as f:
+    json.dump(state, f, indent=2)
+" 2>/dev/null
+
+        echo -ne "  ${BOLD}$name${NC}  ($email)  "
+
+        # 发送最小请求探测
+        local result
+        result=$(CLAUDECODE= claude -p "ok" --output-format json --max-turns 1 --model haiku 2>&1) || true
+
+        if echo "$result" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    if d.get('is_error'):
+        r = d.get('result','')
+        if 'rate' in r.lower() or 'limit' in r.lower() or 'overloaded' in r.lower():
+            print('RATE_LIMITED')
+        else:
+            print('ERROR:' + r[:80])
+    else:
+        cost = d.get('total_cost_usd', 0)
+        print(f'OK:{cost:.4f}')
+except:
+    print('PARSE_ERROR')
+" 2>/dev/null | read -r probe_result; then
+            case "$probe_result" in
+                OK:*)
+                    local cost="${probe_result#OK:}"
+                    echo -e "${GREEN}OK${NC}  ${DIM}(probe cost: \$${cost})${NC}"
+                    ;;
+                RATE_LIMITED)
+                    echo -e "${RED}RATE LIMITED${NC}"
+                    ;;
+                ERROR:*)
+                    echo -e "${YELLOW}ERROR${NC}  ${DIM}${probe_result#ERROR:}${NC}"
+                    ;;
+                *)
+                    echo -e "${YELLOW}???${NC}  ${DIM}${probe_result}${NC}"
+                    ;;
+            esac
+        else
+            echo -e "${YELLOW}FAILED${NC}  ${DIM}(无法解析响应)${NC}"
+        fi
+    done
+
+    echo ""
+
+    # 恢复原始凭证
+    echo "$backup_cred" > "$CRED_FILE"
+    python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    state = json.load(f)
+state['oauthAccount'] = json.loads('$backup_oauth')
+with open('$STATE_FILE', 'w') as f:
+    json.dump(state, f, indent=2)
+" 2>/dev/null
+
+    _ok "已恢复到原账号 ($current_email)"
+}
+
+# ── rm: 删除账号 ──
+cmd_rm() {
+    local name="${1:?用法: claude-switch rm <名称>}"
+    local dir="$STORE_DIR/$name"
+    [ -d "$dir" ] || _die "账号 '$name' 不存在"
+    rm -rf "$dir"
+    _ok "已删除账号 ${BOLD}$name${NC}"
+}
+
+# ── current: 显示当前账号 ──
+cmd_current() {
+    echo -e "${BOLD}当前账号:${NC} $(_current_display)"
+}
+
+# ── usage: 显示当前账号使用情况 ──
+cmd_usage() {
+    echo -e "${BOLD}获取使用情况...${NC}"
+
+    # 读取当前 token
+    local token
+    token=$(python3 -c "
+import json
+try:
+    with open('$CRED_FILE') as f:
+        data = json.load(f)
+    print(data['claudeAiOauth']['accessToken'])
+except Exception as e:
+    print('ERROR:' + str(e))
+    exit(1)
+" 2>/dev/null)
+
+    if [[ "$token" == ERROR:* ]]; then
+        _die "${token#ERROR:}"
+    fi
+
+    echo -e "${DIM}正在查询 API...${NC}"
+
+    # 调用 API
+    local response
+    response=$(curl -s \
+        -H "Authorization: Bearer $token" \
+        -H "anthropic-beta: oauth-2025-04-20" \
+        -H "User-Agent: claude-switch/1.0" \
+        https://api.anthropic.com/api/oauth/usage 2>/dev/null)
+
+    if [ $? -ne 0 ]; then
+        _die "API 请求失败"
+    fi
+
+    # 解析 JSON
+    local parsed
+    parsed=$(echo "$response" | python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+
+    # 提取信息
+    session_percent = '?'
+    weekly_percent = '?'
+    extra_info = ''
+
+    if data.get('five_hour') and data['five_hour'].get('utilization') is not None:
+        session_percent = str(round(data['five_hour']['utilization']))
+
+    if data.get('seven_day') and data['seven_day'].get('utilization') is not None:
+        weekly_percent = str(round(data['seven_day']['utilization']))
+
+    if data.get('extra_usage') and data['extra_usage'].get('is_enabled'):
+        extra = data['extra_usage']
+        if extra.get('used_credits') is not None and extra.get('monthly_limit') is not None:
+            extra_percent = round((extra['used_credits'] / extra['monthly_limit']) * 100)
+            extra_info = f'Extra: \${extra[\"used_credits\"]:.0f} / \${extra[\"monthly_limit\"]} ({extra_percent}%)'
+
+    # 输出格式
+    print(f'SESSION:{session_percent}')
+    print(f'WEEKLY:{weekly_percent}')
+    print(f'EXTRA:{extra_info}')
+
+except Exception as e:
+    print(f'ERROR:{str(e)}')
+    print(f'RAW:{response[:200]}')
+")
+
+    if [[ "$parsed" == ERROR:* ]]; then
+        _die "解析响应失败: ${parsed#ERROR:}"
+    fi
+
+    # 提取值
+    local session_percent weekly_percent extra_info
+    {
+        read -r session_line
+        read -r weekly_line
+        read -r extra_line
+    } <<< "$parsed"
+
+    session_percent="${session_line#SESSION:}"
+    weekly_percent="${weekly_line#WEEKLY:}"
+    extra_info="${extra_line#EXTRA:}"
+
+    # 显示结果
+    echo ""
+    echo -e "${BOLD}使用情况:${NC}"
+    echo "  Session (5小时): ${session_percent}%"
+    echo "  Weekly (7天): ${weekly_percent}%"
+
+    if [ -n "$extra_info" ]; then
+        echo "  $extra_info"
+    fi
+
+    # 显示账号信息
+    echo ""
+    cmd_current
+}
+
+# ── usage-all: 显示所有账号使用情况 ──
+cmd_usage_all() {
+    local current_email
+    current_email=$(_current_email)
+
+    # 备份当前凭证
+    local backup_cred backup_oauth
+    backup_cred=$(cat "$CRED_FILE")
+    backup_oauth=$(python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    print(json.dumps(json.load(f).get('oauthAccount', {})))
+" 2>/dev/null)
+
+    echo -e "${BOLD}获取各账号使用情况...${NC}"
+    echo ""
+
+    for dir in "$STORE_DIR"/*/; do
+        [ -d "$dir" ] || continue
+        local name email
+        name=$(basename "$dir")
+        read -r email < <(_read_account_info "${dir}oauth_account.json")
+
+        # 临时切换到该账号
+        cp "${dir}credentials.json" "$CRED_FILE"
+        python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    state = json.load(f)
+with open('${dir}oauth_account.json') as f:
+    oauth = json.load(f)
+state['oauthAccount'] = oauth
+with open('$STATE_FILE', 'w') as f:
+    json.dump(state, f, indent=2)
+" 2>/dev/null
+
+        echo -ne "  ${BOLD}$name${NC}  ($email)  "
+
+        # 获取 usage 信息
+        local token
+        token=$(python3 -c "
+import json
+try:
+    with open('$CRED_FILE') as f:
+        data = json.load(f)
+    print(data['claudeAiOauth']['accessToken'])
+except:
+    print('ERROR')
+" 2>/dev/null)
+
+        if [[ "$token" == ERROR* ]]; then
+            echo -e "${RED}TOKEN_ERROR${NC}"
+            continue
+        fi
+
+        # 调用 API
+        local response
+        response=$(curl -s \
+            -H "Authorization: Bearer $token" \
+            -H "anthropic-beta: oauth-2025-04-20" \
+            -H "User-Agent: claude-switch/1.0" \
+            https://api.anthropic.com/api/oauth/usage 2>/dev/null)
+
+        if [ $? -ne 0 ]; then
+            echo -e "${YELLOW}API_ERROR${NC}"
+            continue
+        fi
+
+        # 解析
+        local usage_info
+        usage_info=$(echo "$response" | python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    session = data.get('five_hour', {}).get('utilization')
+    weekly = data.get('seven_day', {}).get('utilization')
+
+    if session is None:
+        session_str = '?'
+    else:
+        session_str = f'{int(round(session))}%'
+
+    if weekly is None:
+        weekly_str = '?'
+    else:
+        weekly_str = f'{int(round(weekly))}%'
+
+    # 检查 extra usage
+    extra_str = ''
+    extra = data.get('extra_usage')
+    if extra and extra.get('is_enabled'):
+        used = extra.get('used_credits')
+        limit = extra.get('monthly_limit')
+        if used is not None and limit is not None:
+            extra_percent = int(round((used / limit) * 100))
+            extra_str = f' +{extra_percent}%'
+
+    print(f'{session_str}/{weekly_str}{extra_str}')
+except:
+    print('PARSE_ERROR')
+" 2>/dev/null)
+
+        echo -e "${GREEN}$usage_info${NC}"
+    done
+
+    echo ""
+
+    # 恢复原始凭证
+    echo "$backup_cred" > "$CRED_FILE"
+    python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    state = json.load(f)
+state['oauthAccount'] = json.loads('$backup_oauth')
+with open('$STATE_FILE', 'w') as f:
+    json.dump(state, f, indent=2)
+" 2>/dev/null
+
+    _ok "已恢复到原账号 ($current_email)"
+}
+
+# ── login: 调用 claude login 并自动保存 ──
+cmd_login() {
+    local name="${1:-}"
+
+    _info "正在启动 Claude 登录..."
+    claude auth login
+    local rc=$?
+
+    if [ $rc -ne 0 ]; then
+        _die "登录失败 (exit code: $rc)"
+    fi
+
+    _ok "登录成功: $(_current_display)"
+
+    # 如果提供了名称，直接保存
+    if [ -n "$name" ]; then
+        cmd_save "$name"
+        return
+    fi
+
+    # 否则交互式询问
+    echo ""
+    read -rp "$(echo -e "${CYAN}>>>${NC} 保存为哪个名称? (留空跳过): ")" name
+    if [ -n "$name" ]; then
+        cmd_save "$name"
+    fi
+}
+
+# ── interactive: 交互式选择账号 ──
+cmd_interactive() {
+    set +e
+    local current_email
+    current_email=$(_current_email)
+
+    # 备份当前凭证
+    local backup_cred backup_oauth
+    backup_cred=$(cat "$CRED_FILE")
+    backup_oauth=$(python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    print(json.dumps(json.load(f).get('oauthAccount', {})))
+" 2>/dev/null)
+
+    echo -e "${BOLD}选择要切换的账号:${NC}"
+    echo ""
+
+    # 收集账号信息
+    local accounts=()
+    local i=1
+
+    for dir in "$STORE_DIR"/*/; do
+        [ -d "$dir" ] || continue
+        local name email
+        name=$(basename "$dir")
+        read -r email < <(_read_account_info "${dir}oauth_account.json")
+
+        # 临时切换到该账号以获取 usage
+        cp "${dir}credentials.json" "$CRED_FILE"
+        python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    state = json.load(f)
+with open('${dir}oauth_account.json') as f:
+    oauth = json.load(f)
+state['oauthAccount'] = oauth
+with open('$STATE_FILE', 'w') as f:
+    json.dump(state, f, indent=2)
+" 2>/dev/null
+
+        # 获取 usage 信息
+        local token
+        token=$(python3 -c "
+import json
+try:
+    with open('$CRED_FILE') as f:
+        data = json.load(f)
+    print(data['claudeAiOauth']['accessToken'])
+except:
+    print('ERROR')
+" 2>/dev/null)
+
+        local usage_info="?"
+        if [[ "$token" != ERROR* ]]; then
+            # 调用 API
+            local response
+            response=$(curl -s \
+                -H "Authorization: Bearer $token" \
+                -H "anthropic-beta: oauth-2025-04-20" \
+                -H "User-Agent: claude-switch/1.0" \
+                https://api.anthropic.com/api/oauth/usage 2>/dev/null)
+
+            if [ $? -eq 0 ]; then
+                usage_info=$(echo "$response" | python3 -c "
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+    session = data.get('five_hour', {}).get('utilization')
+    weekly = data.get('seven_day', {}).get('utilization')
+
+    if session is None:
+        session_int = -1
+        session_str = '?'
+    else:
+        session_int = int(round(session))
+        session_str = f'{session_int}%'
+
+    if weekly is None:
+        weekly_int = -1
+        weekly_str = '?'
+    else:
+        weekly_int = int(round(weekly))
+        weekly_str = f'{weekly_int}%'
+
+    # 检查 extra usage
+    extra_int = -1
+    extra_str = ''
+    extra = data.get('extra_usage')
+    if extra and extra.get('is_enabled'):
+        used = extra.get('used_credits')
+        limit = extra.get('monthly_limit')
+        if used is not None and limit is not None:
+            extra_int = int(round((used / limit) * 100))
+            extra_str = f' +{extra_int}%'
+
+    formatted = f'{session_str}/{weekly_str}{extra_str}'
+    print(f'{session_int}:{weekly_int}:{extra_int}:{formatted}')
+except Exception as e:
+    print('-1:-1:-1:?')
+" 2>/dev/null)
+            fi
+        fi
+
+        # 解析 usage 信息
+        IFS=':' read -r session_int weekly_int extra_int formatted <<< "$usage_info"
+
+        # 确定颜色
+        local color="${GREEN}"  # 默认绿色
+
+        # 1. main 账号标灰色
+        if [ "$name" = "main" ]; then
+            color="${DIM}"
+        # 2. 使用率未知（?）标黄色
+        elif [ "$session_int" -eq -1 ] || [ "$weekly_int" -eq -1 ]; then
+            color="${YELLOW}"
+        # 3. session 或 weekly 使用率为 100% 标红色
+        elif [ "$session_int" -eq 100 ] || [ "$weekly_int" -eq 100 ]; then
+            color="${RED}"
+        fi
+
+        # 存储账号信息
+        accounts+=("$name:$email:$formatted:$color")
+
+        # 显示选项
+        local current_marker=""
+        if [ "$email" = "$current_email" ]; then
+            current_marker="${GREEN}← 当前${NC}"
+        fi
+
+        echo -e "  ${CYAN}$i${NC}. ${BOLD}$name${NC}  $email  ${color}$formatted${NC}  $current_marker"
+        ((i++))
+    done
+
+    # 恢复原始凭证
+    echo "$backup_cred" > "$CRED_FILE"
+    python3 -c "
+import json
+with open('$STATE_FILE') as f:
+    state = json.load(f)
+state['oauthAccount'] = json.loads('$backup_oauth')
+with open('$STATE_FILE', 'w') as f:
+    json.dump(state, f, indent=2)
+" 2>/dev/null || true
+
+    if [ ${#accounts[@]} -eq 0 ]; then
+        echo -e "  ${YELLOW}(没有保存的账号)${NC}"
+        echo ""
+        echo "使用以下命令保存账号:"
+        echo "  claude-switch save <名称>    保存当前登录的账号"
+        echo "  claude-switch login [名称]   登录新账号并保存"
+        set -e
+        return 1
+    fi
+
+    echo ""
+    echo -e "${CYAN}0${NC}. 取消"
+    echo ""
+
+    # 获取用户选择
+    local choice
+    echo -e "${CYAN}>>>${NC} 选择账号 (0-${#accounts[@]}): " >&2
+    read -r choice
+
+    # 验证输入
+    if ! [[ "$choice" =~ ^[0-9]+$ ]]; then
+        _die "请输入数字"
+    fi
+
+    if [ "$choice" -eq 0 ]; then
+        _ok "已取消"
+        set -e
+        return 0
+    fi
+
+    if [ "$choice" -lt 1 ] || [ "$choice" -gt ${#accounts[@]} ]; then
+        _die "无效的选择"
+    fi
+
+    # 提取账号名称并切换
+    local selected_info="${accounts[$((choice-1))]}"
+    local selected_name="${selected_info%%:*}"
+
+    echo ""
+    cmd_switch "$selected_name"
+    set -e
+}
+
+# ── 主入口 ──
+case "${1:-}" in
+    save)    cmd_save "${2:-}" ;;
+    login)   cmd_login "${2:-}" ;;
+    ls|list) cmd_ls ;;
+    check)   cmd_check ;;
+    rm)      cmd_rm "${2:-}" ;;
+    current) cmd_current ;;
+    usage)   cmd_usage ;;
+    usage-all) cmd_usage_all ;;
+    interactive) cmd_interactive ;;
+    "") cmd_interactive ;;
+    -h|--help|help)
+        echo "claude-switch: 一键切换 Claude Code 账号"
+        echo ""
+        echo "用法:"
+        echo "  claude-switch login [名称]   登录新账号并保存"
+        echo "  claude-switch save <名称>    保存当前登录的账号"
+        echo "  claude-switch <名称>         切换到指定账号"
+        echo "  claude-switch ls             列出所有账号 (含订阅类型)"
+        echo "  claude-switch check          检测各账号可用性 (发探测请求)"
+        echo "  claude-switch usage          显示当前账号使用情况"
+        echo "  claude-switch usage-all      显示所有账号使用情况"
+        echo "  claude-switch interactive    交互式选择账号"
+        echo "  claude-switch rm <名称>      删除已保存账号"
+        echo "  claude-switch current        显示当前账号"
+        echo ""
+        echo "示例:"
+        echo "  claude-switch                # 交互式选择账号 (显示额度)"
+        echo "  claude-switch login acc2     # 登录新账号并保存为 acc2"
+        echo "  claude-switch login          # 登录新账号，交互式输入名称"
+        echo "  claude-switch acc1           # 一键切换到 acc1"
+        echo "  claude-switch check          # 检测哪些账号还有额度"
+        echo "  claude-switch usage-all      # 显示所有账号额度"
+        ;;
+    *)       cmd_switch "$1" ;;
+esac
+EOF
+
+# Copy script to bin directory
+_info "Installing ${BOLD}${SCRIPT_NAME}${NC} to ${BIN_DIR}/..."
+cp "/tmp/${SCRIPT_NAME}" "${BIN_DIR}/${SCRIPT_NAME}"
+chmod +x "${BIN_DIR}/${SCRIPT_NAME}"
+
+# Create alias/symlink
+_info "Creating alias ${BOLD}${ALIAS_NAME}${NC}..."
+ln -sf "${BIN_DIR}/${SCRIPT_NAME}" "${BIN_DIR}/${ALIAS_NAME}"
+chmod +x "${BIN_DIR}/${ALIAS_NAME}"
+
+# Check if bin directory is in PATH
+if ! echo "$PATH" | tr ':' '\n' | grep -q "^${BIN_DIR}$"; then
+    _warn "${BIN_DIR} is not in your PATH. You may need to add it."
+    echo "Add this to your ~/.bashrc or ~/.zshrc:"
+    echo "  export PATH=\"${BIN_DIR}:\$PATH\""
+fi
+
+_ok "Installation complete!"
+echo ""
+echo -e "${BOLD}Available commands:${NC}"
+echo "  ${SCRIPT_NAME}     - Main script with all features"
+echo "  ${ALIAS_NAME}      - Short alias for ${SCRIPT_NAME}"
+echo ""
+echo -e "${BOLD}Usage examples:${NC}"
+echo "  ${ALIAS_NAME}                # Interactive account selection"
+echo "  ${ALIAS_NAME} login [name]   # Login and save account"
+echo "  ${ALIAS_NAME} save <name>    # Save current account"
+echo "  ${ALIAS_NAME} ls             # List saved accounts"
+echo "  ${ALIAS_NAME} usage          # Show current usage"
+echo "  ${ALIAS_NAME} usage-all      # Show all accounts' usage"
+echo "  ${ALIAS_NAME} check          # Check account availability"
+echo ""
+echo -e "${BOLD}Next steps:${NC}"
+echo "1. Run ${ALIAS_NAME} login to save your current account"
+echo "2. Or run ${ALIAS_NAME} save <name> if already logged in"
+echo "3. Use ${ALIAS_NAME} to switch between accounts interactively"

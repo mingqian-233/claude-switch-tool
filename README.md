@@ -1,21 +1,8 @@
 # Claude Switch Tool
 
-A tool to switch between Claude Pro accounts while preserving chat history.
+Switch Claude accounts in seconds without breaking your local workflow.
 
-## Files
-
-- `claude-switch` - Main script
-- `claude-switch.ps1` - Native Windows main script
-- `install-claude-switch.sh` - Installation script
-- `install-claude-switch.ps1` - Windows installation script
-- `install-claude-switch.cmd` - Windows one-click installer entry
-- `pack-claude-switch.sh` - Linux/macOS packing script
-- `pack-claude-switch.ps1` - Windows packing script
-
-## Installation
-# Claude Switch Tool
-
-A tool to switch between Claude Pro accounts while preserving chat history.
+The usage presentation is inspired by https://github.com/ZingerLittleBee/cc-subscription-switch, while this project focuses on production-friendly local compatibility: account switching is designed to preserve your existing Claude environment, including MCP, Skills, Plugins, and other local setup/context.
 
 ## Files
 

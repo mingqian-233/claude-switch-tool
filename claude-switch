@@ -349,19 +349,38 @@ import json, sys
 try:
     data = json.loads(sys.stdin.read())
 
+    if isinstance(data, dict) and data.get('error'):
+        err = data.get('error')
+        if isinstance(err, dict):
+            msg = err.get('message') or str(err)
+        else:
+            msg = str(err)
+        print(f'ERROR:API:{msg[:160]}')
+        sys.exit(0)
+
+    five_hour = data.get('five_hour') or data.get('fiveHour') or {}
+    seven_day = data.get('seven_day') or data.get('sevenDay') or {}
+    extra_usage = data.get('extra_usage') or data.get('extraUsage') or {}
+
     # 提取信息
     session_percent = '?'
     weekly_percent = '?'
     extra_info = ''
 
-    if data.get('five_hour') and data['five_hour'].get('utilization') is not None:
-        session_percent = str(round(data['five_hour']['utilization']))
+    session_val = five_hour.get('utilization')
+    if session_val is None:
+        session_val = five_hour.get('utilization_percent')
+    if session_val is not None:
+        session_percent = str(round(session_val))
 
-    if data.get('seven_day') and data['seven_day'].get('utilization') is not None:
-        weekly_percent = str(round(data['seven_day']['utilization']))
+    weekly_val = seven_day.get('utilization')
+    if weekly_val is None:
+        weekly_val = seven_day.get('utilization_percent')
+    if weekly_val is not None:
+        weekly_percent = str(round(weekly_val))
 
-    if data.get('extra_usage') and data['extra_usage'].get('is_enabled'):
-        extra = data['extra_usage']
+    if extra_usage and extra_usage.get('is_enabled'):
+        extra = extra_usage
         if extra.get('used_credits') is not None and extra.get('monthly_limit') is not None:
             extra_percent = round((extra['used_credits'] / extra['monthly_limit']) * 100)
             extra_info = f'Extra: \${extra[\"used_credits\"]:.0f} / \${extra[\"monthly_limit\"]} ({extra_percent}%)'
@@ -372,8 +391,7 @@ try:
     print(f'EXTRA:{extra_info}')
 
 except Exception as e:
-    print(f'ERROR:{str(e)}')
-    print(f'RAW:{response[:200]}')
+    print(f'ERROR:PARSE:{str(e)}')
 ")
 
     if [[ "$parsed" == ERROR:* ]]; then
@@ -481,8 +499,27 @@ except:
 import json, sys
 try:
     data = json.loads(sys.stdin.read())
-    session = data.get('five_hour', {}).get('utilization')
-    weekly = data.get('seven_day', {}).get('utilization')
+
+    if isinstance(data, dict) and data.get('error'):
+        err = data.get('error')
+        if isinstance(err, dict):
+            msg = err.get('message') or str(err)
+        else:
+            msg = str(err)
+        print('API_ERROR:' + msg[:120])
+        sys.exit(0)
+
+    five_hour = data.get('five_hour') or data.get('fiveHour') or {}
+    seven_day = data.get('seven_day') or data.get('sevenDay') or {}
+    extra_usage = data.get('extra_usage') or data.get('extraUsage') or {}
+
+    session = five_hour.get('utilization')
+    if session is None:
+        session = five_hour.get('utilization_percent')
+
+    weekly = seven_day.get('utilization')
+    if weekly is None:
+        weekly = seven_day.get('utilization_percent')
 
     if session is None:
         session_str = '?'
@@ -496,7 +533,7 @@ try:
 
     # 检查 extra usage
     extra_str = ''
-    extra = data.get('extra_usage')
+    extra = extra_usage
     if extra and extra.get('is_enabled'):
         used = extra.get('used_credits')
         limit = extra.get('monthly_limit')
@@ -509,7 +546,17 @@ except:
     print('PARSE_ERROR')
 " 2>/dev/null)
 
-        echo -e "${GREEN}$usage_info${NC}"
+        case "$usage_info" in
+            API_ERROR:*)
+                echo -e "${YELLOW}API_ERROR${NC}  ${DIM}${usage_info#API_ERROR:}${NC}"
+                ;;
+            PARSE_ERROR)
+                echo -e "${YELLOW}PARSE_ERROR${NC}"
+                ;;
+            *)
+                echo -e "${GREEN}$usage_info${NC}"
+                ;;
+        esac
     done
 
     echo ""

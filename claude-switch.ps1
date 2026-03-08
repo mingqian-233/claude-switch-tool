@@ -277,7 +277,28 @@ function Get-UsageSummary {
         'User-Agent' = 'claude-switch/1.0'
     }
 
-    $data = Invoke-RestMethod -Method Get -Uri 'https://api.anthropic.com/api/oauth/usage' -Headers $headers
+    # 使用 Invoke-WebRequest 以获取 HTTP 状态码
+    try {
+        $response = Invoke-WebRequest -Method Get -Uri 'https://api.anthropic.com/api/oauth/usage' -Headers $headers -UseBasicParsing
+    }
+    catch {
+        $statusCode = 0
+        if ($_.Exception.Response) {
+            $statusCode = [int]$_.Exception.Response.StatusCode
+        }
+        if ($statusCode -gt 0) {
+            throw "HTTP $statusCode"
+        }
+        throw "API 请求失败: $($_.Exception.Message)"
+    }
+
+    $data = $response.Content | ConvertFrom-Json
+
+    # 检查是否为错误响应
+    if ($null -ne $data.error) {
+        $errMsg = if ($null -ne $data.error.message) { $data.error.message } else { "$($data.error)" }
+        throw "API error: $errMsg"
+    }
 
     $sessionStr = '?'
     $weeklyStr = '?'
@@ -579,7 +600,8 @@ function Cmd-UsageAll {
                 Write-Host ("  {0} ({1})  {2}{3}" -f $name, $acct.Email, $snapshot.Formatted, $currentMark) -ForegroundColor $color
             }
             catch {
-                Write-Host ("  {0} ({1})  ERROR" -f $name, $acct.Email) -ForegroundColor Yellow
+                $errDetail = $_.Exception.Message
+                Write-Host ("  {0} ({1})  {2}" -f $name, $acct.Email, $errDetail) -ForegroundColor Red
             }
         }
     }
